@@ -1,0 +1,497 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: Inter, system-ui, sans-serif;
+      font-size: 12px;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      height: 100vh;
+    }
+
+    button {
+      background: #18a0fb;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      padding: 10px 16px;
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+    }
+
+    button:hover {
+      background: #0d8de5;
+    }
+
+    button.cancel {
+      background: #f24822;
+    }
+
+    button.cancel:hover {
+      background: #d93d1a;
+    }
+
+    button:disabled {
+      background: #ccc;
+      cursor: not-allowed;
+    }
+
+    .settings {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+    }
+
+    .settings label {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      color: #333;
+    }
+
+    .settings input {
+      width: 40px;
+      padding: 6px 8px;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      font-size: 12px;
+      text-align: center;
+    }
+
+    .log {
+      flex: 1;
+      background: #1e1e1e;
+      color: #d4d4d4;
+      border-radius: 6px;
+      padding: 12px;
+      font-family: 'SF Mono', Monaco, monospace;
+      font-size: 11px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+
+    .log-entry {
+      margin-bottom: 4px;
+    }
+
+    .log-entry.success {
+      color: #4ec9b0;
+    }
+
+    .log-entry.error {
+      color: #f14c4c;
+    }
+
+    .log-entry.info {
+      color: #9cdcfe;
+    }
+
+    .log-entry.warn {
+      color: #dcdcaa;
+    }
+
+    .progress {
+      height: 4px;
+      background: #e5e5e5;
+      border-radius: 2px;
+      overflow: hidden;
+    }
+
+    .progress-bar {
+      height: 100%;
+      background: #18a0fb;
+      width: 0%;
+      transition: width 0.2s;
+    }
+
+    input[type="file"] {
+      display: none;
+    }
+
+    .stats {
+      font-size: 11px;
+      color: #666;
+    }
+
+    .hint {
+      font-size: 10px;
+      color: #999;
+    }
+  </style>
+</head>
+<body>
+  <div class="settings">
+    <label>
+      Separator:
+      <input type="text" id="separator" value="_" style="width: 60px;">
+    </label>
+    <span class="hint">Format: [category]_[name]_[theme]_[state].png</span>
+  </div>
+
+  <button id="actionBtn">📁 Select folder with icons</button>
+  <input type="file" id="fileInput" webkitdirectory multiple accept="image/png">
+
+  <div class="progress">
+    <div class="progress-bar" id="progressBar"></div>
+  </div>
+
+  <div class="stats" id="stats">Files processed: 0/0 (errors: 0), new icons: 0, skipped: 0</div>
+  <div class="log" id="log"></div>
+
+  <script>
+    const actionBtn = document.getElementById('actionBtn');
+    const fileInput = document.getElementById('fileInput');
+    const logEl = document.getElementById('log');
+    const progressBar = document.getElementById('progressBar');
+    const statsEl = document.getElementById('stats');
+    const separatorInput = document.getElementById('separator');
+
+    let isProcessing = false;
+    let isCancelled = false;
+
+    // Format time in 24h format
+    function formatTime() {
+      const now = new Date();
+      const h = String(now.getHours()).padStart(2, '0');
+      const m = String(now.getMinutes()).padStart(2, '0');
+      const s = String(now.getSeconds()).padStart(2, '0');
+      return `${h}:${m}:${s}`;
+    }
+
+    function log(message, type = '') {
+      const entry = document.createElement('div');
+      entry.className = `log-entry ${type}`;
+      entry.textContent = `[${formatTime()}] ${message}`;
+      logEl.appendChild(entry);
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    function setProgress(percent) {
+      progressBar.style.width = `${percent}%`;
+    }
+
+    function setStats(text) {
+      statsEl.textContent = text;
+    }
+
+    function sleep(ms) {
+      return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    function setProcessingState(processing) {
+      isProcessing = processing;
+      separatorInput.disabled = processing;
+
+      if (processing) {
+        actionBtn.textContent = '⛔ Cancel';
+        actionBtn.classList.add('cancel');
+
+      } else {
+        actionBtn.textContent = '📁 Select folder with icons';
+        actionBtn.classList.remove('cancel');
+      }
+    }
+
+    function buildPattern(sep) {
+      const escapedSep = sep.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      return new RegExp(`^(\\w+?)${escapedSep}(\\w+?)${escapedSep}(\\w+?)${escapedSep}(\\w+?)\\.png$`, 'i');
+    }
+
+    actionBtn.addEventListener('click', () => {
+      if (isProcessing) {
+        isCancelled = true;
+        log('⛔ Cancelling operation...', 'warn');
+
+        return;
+      }
+
+      fileInput.click();
+    });
+
+    fileInput.addEventListener('change', async (e) => {
+      const files = Array.from(e.target.files).filter(f => f.name.toLowerCase().endsWith('.png'));
+      const separator = separatorInput.value || '_';
+      const pattern = buildPattern(separator);
+
+      if (files.length === 0) {
+        log('No PNG files found', 'error');
+        return;
+      }
+
+      log(`Found ${files.length} PNG files (separator: "${separator}")`, 'info');
+      setProcessingState(true);
+      isCancelled = false;
+
+      // Group by icons (category_name)
+      const groups = {};
+
+      // Collect all unique themes and states for each group
+      for (const file of files) {
+        const match = file.name.match(pattern);
+        if (!match) {
+          log(`⚠️ Skipped (invalid name: ${file.name}`, 'error');
+          continue;
+        }
+
+        const [, category, name, theme, state] = match;
+        const groupKey = `${category}${separator}${name}`;
+
+        if (!groups[groupKey]) {
+          groups[groupKey] = {
+            category,
+            name,
+            themes: new Set(),
+            states: new Set(),
+            files: {}
+          };
+        }
+
+        groups[groupKey].themes.add(theme);
+        groups[groupKey].states.add(state);
+        groups[groupKey].files[`${theme}${separator}${state}`] = file;
+      }
+
+      // Group by categories for proper positioning
+      const categories = {};
+      for (const [key, group] of Object.entries(groups)) {
+        if (!categories[group.category]) {
+          categories[group.category] = [];
+        }
+
+        categories[group.category].push({ key, ...group });
+      }
+
+      const categoryNames = Object.keys(categories);
+      const totalIcons = Object.keys(groups).length;
+      const totalFiles = files.length;
+
+      log(`Grouped into ${totalIcons} components, ${categoryNames.length} categories`, 'info');
+
+      let processedIcons = 0;
+      let processedFiles = 0;
+
+      let createdCount = 0;
+      let skippedCount = 0;
+      let errorCount = 0;
+
+      let currentY = 0;
+
+      function updateStats() {
+        setStats(`Files processed: ${processedFiles}/${totalFiles} (errors: ${errorCount}), new icons: ${createdCount}, skipped: ${skippedCount}`);
+      }
+
+      updateStats();
+
+      for (const categoryName of categoryNames) {
+        if (isCancelled) {
+          break;
+        }
+
+        const categoryGroups = categories[categoryName];
+        let currentX = 0;
+        let maxHeightInRow = 0;
+
+        log(`\n📂 Category: ${categoryName}`, 'info');
+
+        for (const group of categoryGroups) {
+          if (isCancelled) {
+            break;
+          }
+
+          log(`\n📦 Processing: ${group.category} / ${group.name}`, 'info');
+
+          const themes = Array.from(group.themes).sort();
+          const states = Array.from(group.states).sort();
+
+          log(`  Themes: ${themes.join(', ')}`, 'info');
+          log(`  States: ${states.join(', ')}`, 'info');
+
+          const variantsData = [];
+          let iconWidth = 16;
+          let iconHeight = 16;
+          let hasProblems = false;
+
+          for (const theme of themes) {
+            for (const state of states) {
+              const file = group.files[`${theme}${separator}${state}`];
+              if (file) {
+                try {
+                  const dimensions = await getImageDimensions(file);
+                  iconWidth = dimensions.width / 2;
+                  iconHeight = dimensions.height / 2;
+                  break;
+                } catch (e) {}
+              }
+            }
+            if (iconWidth !== 16) {
+              break;
+            }
+          }
+
+          // Create matrix of all theme x state combinations
+          for (const theme of themes) {
+            for (const state of states) {
+              const fileKey = `${theme}${separator}${state}`;
+              const file = group.files[fileKey];
+
+              if (file) {
+                try {
+                  const bytes = await readFileAsBytes(file);
+                  const dimensions = await getImageDimensions(file);
+
+                  variantsData.push({
+                    theme,
+                    state,
+                    bytes: Array.from(bytes),
+                    width: dimensions.width,
+                    height: dimensions.height,
+                    isMissing: false
+                  });
+
+                  processedFiles++;
+                  log(`  ✓ ${theme}/${state} (${dimensions.width}x${dimensions.height})`, 'success');
+                } catch (err) {
+                  errorCount++;
+                  hasProblems = true;
+                  log(`  ✗ Error reading ${file.name}: ${err.message} (${err.name})`, 'error');
+                  variantsData.push({
+                    theme,
+                    state,
+                    isMissing: true,
+                    width: iconWidth * 2,
+                    height: iconHeight * 2
+                  });
+                }
+
+              } else {
+                hasProblems = true;
+                log(`  ⚠️ Missing: ${theme}/${state} — placeholder will be created`, 'warn');
+                variantsData.push({
+                  theme,
+                  state,
+                  isMissing: true,
+                  width: iconWidth * 2,
+                  height: iconHeight * 2
+                });
+              }
+
+              updateStats();
+            }
+          }
+
+          if (variantsData.length > 0) {
+            parent.postMessage({
+              pluginMessage: {
+                type: 'create-icon',
+                category: group.category,
+                name: group.name,
+                themes,
+                states,
+                variants: variantsData,
+                position: { x: currentX, y: currentY },
+                hasProblems,
+                iconWidth,
+                iconHeight
+              }
+            }, '*');
+
+            const componentResult = await waitForComponentCreated();
+            if (componentResult.skipped) {
+              skippedCount++;
+
+            } else {
+              createdCount++;
+              currentX += componentResult.width + 40;
+              maxHeightInRow = Math.max(maxHeightInRow, componentResult.height);
+            }
+          }
+
+          processedIcons++;
+          setProgress((processedIcons / totalIcons) * 100);
+          updateStats();
+
+          if (!isCancelled && processedIcons < totalIcons) {
+            await sleep(500);
+          }
+        }
+
+        currentY += maxHeightInRow + 40;
+      }
+
+      if (isCancelled) {
+        log(`\n⛔ Stopped! Processed ${processedIcons} / ${totalIcons}`, 'warn');
+      } else {
+        log(`\n✅ Done! Created: ${createdCount}, skipped: ${skippedCount}`, 'success');
+      }
+
+      updateStats();
+      setProcessingState(false);
+      fileInput.value = '';
+    });
+
+    function readFileAsBytes(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(new Uint8Array(reader.result));
+        reader.onerror = () => reject(new Error(`FileReader error: ${reader.error?.message || 'unknown'}`));
+        reader.readAsArrayBuffer(file);
+      });
+    }
+
+    function getImageDimensions(file) {
+      return new Promise((resolve, reject) => {
+        const img = new Image();
+
+        img.onload = () => {
+          resolve({ width: img.width, height: img.height });
+          URL.revokeObjectURL(img.src);
+        };
+        img.onerror = () => reject(new Error('Image decode failed'));
+        img.src = URL.createObjectURL(file);
+      });
+    }
+
+    let componentCreatedResolve = null;
+
+    function waitForComponentCreated() {
+      return new Promise(resolve => {
+        componentCreatedResolve = resolve;
+      });
+    }
+
+    // Figma Plugin communication
+    window.onmessage = (e) => {
+      const msg = e.data.pluginMessage;
+      if (!msg) {
+        return;
+      }
+
+      if (msg.type === 'log') {
+        log(msg.message, msg.level || '');
+        return;
+      }
+
+      if (msg.type === 'component-created' && componentCreatedResolve) {
+        componentCreatedResolve({
+          width: msg.width,
+          height: msg.height,
+          skipped: msg.skipped || false
+        });
+
+        componentCreatedResolve = null;
+      }
+    };
+  </script>
+</body>
+</html>
